@@ -4,13 +4,26 @@ database.py
 Central place for the SQLAlchemy engine, session factory, and one-time
 schema creation. Also seeds sensible per-user defaults (accounts,
 categories, the Splitwise virtual account) the first time a user signs up.
+
+Deployment note
+----------------
+Streamlit Community Cloud's filesystem is EPHEMERAL - anything written to
+local disk (including a SQLite file) is wiped on every reboot/redeploy.
+So in production this connects to a hosted Postgres database instead,
+configured via `st.secrets["DATABASE_URL"]` (Settings -> Secrets in the
+Streamlit Cloud dashboard). Free options that work well: Supabase, Neon,
+or Railway Postgres.
+
+For local development, if no DATABASE_URL secret/env var is found, it
+transparently falls back to a local SQLite file so `streamlit run app.py`
+still works with zero setup.
 """
 from __future__ import annotations
 
-import datetime as dt
 import os
 from contextlib import contextmanager
 
+import streamlit as st
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -22,24 +35,53 @@ from models import (
     CategoryKind,
 )
 
-DB_DIR = os.path.join(os.path.dirname(__file__), "data")
-os.makedirs(DB_DIR, exist_ok=True)
-DB_PATH = os.path.join(DB_DIR, "finance_tracker.db")
 
-engine = create_engine(
-    f"sqlite:///{DB_PATH}",
-    connect_args={"check_same_thread": False},
-)
+def _get_database_url() -> str | None:
+    """Look for a Postgres connection string in Streamlit secrets, then env vars."""
+    try:
+        if "DATABASE_URL" in st.secrets:
+            return st.secrets["DATABASE_URL"]
+        if "connections" in st.secrets and "postgres" in st.secrets["connections"]:
+            return st.secrets["connections"]["postgres"]["url"]
+    except (FileNotFoundError, KeyError, AttributeError):
+        pass  # No secrets.toml present (e.g. fresh local clone) - that's fine.
+    return os.environ.get("DATABASE_URL")
 
 
-@event.listens_for(engine, "connect")
-def _set_sqlite_pragma(dbapi_connection, _):
-    """Enable foreign keys + WAL mode for better concurrent read/write behaviour."""
-    cursor = dbapi_connection.cursor()
-    cursor.execute("PRAGMA foreign_keys=ON")
-    cursor.execute("PRAGMA journal_mode=WAL")
-    cursor.close()
+def _build_engine():
+    database_url = _get_database_url()
 
+    if database_url:
+        # Normalize the common "postgres://" scheme (used by Supabase/Railway/Heroku)
+        # to the "postgresql+psycopg2://" driver SQLAlchemy expects.
+        if database_url.startswith("postgres://"):
+            database_url = database_url.replace("postgres://", "postgresql+psycopg2://", 1)
+        elif database_url.startswith("postgresql://"):
+            database_url = database_url.replace("postgresql://", "postgresql+psycopg2://", 1)
+
+        return create_engine(
+            database_url,
+            pool_pre_ping=True,   # avoids "server closed the connection" after idle periods
+            pool_recycle=300,     # recycle connections every 5 min (hosted PG free tiers idle-timeout)
+        ), "postgres"
+
+    # --- Local dev fallback: SQLite ---
+    db_dir = os.path.join(os.path.dirname(__file__), "data")
+    os.makedirs(db_dir, exist_ok=True)
+    db_path = os.path.join(db_dir, "finance_tracker.db")
+    engine = create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False})
+
+    @event.listens_for(engine, "connect")
+    def _set_sqlite_pragma(dbapi_connection, _):
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.close()
+
+    return engine, "sqlite"
+
+
+engine, DB_BACKEND = _build_engine()
 
 SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
 
