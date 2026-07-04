@@ -64,7 +64,30 @@ def render_auth_screen() -> None:
     with tab_login:
         with st.form("login_form"):
             email = st.text_input("Email")
-            password = st.text_input("Password", type="password")
+            password = st.text_input("Password", type# --------------------------------------------------------------------------- #
+# Top navigation bar (mobile-first: survives phone browsers, no auto-collapse)
+# --------------------------------------------------------------------------- #
+NAV_ITEMS = [
+    ("Dashboard", "\U0001F3E0"),
+    ("Accounts", "\U0001F3E6"),
+    ("Transactions", "\U0001F4CB"),
+    ("Analytics", "\U0001F4C8"),
+    ("Recurring", "\U0001F501"),
+    ("Settings", "\U00002699\U0000FE0F"),
+]
+
+if "active_nav" not in st.session_state:
+    st.session_state.active_nav = "Dashboard"
+
+nav_cols = st.columns(len(NAV_ITEMS))
+for (label, icon), col in zip(NAV_ITEMS, nav_cols):
+    is_active = st.session_state.active_nav == label
+    if col.button(f"{icon}\n{label}", key=f"nav_{label}", use_container_width=True,
+                  type="primary" if is_active else "secondary"):
+        st.session_state.active_nav = label
+        st.rerun()
+
+st.divider()="password")
             submitted = st.form_submit_button("Log In", type="primary", use_container_width=True)
         if submitted:
             ok, msg, user = auth.log_in(email, password)
@@ -120,12 +143,11 @@ if "active_nav" not in st.session_state:
 nav_cols = st.columns(len(NAV_ITEMS))
 for (label, icon), col in zip(NAV_ITEMS, nav_cols):
     is_active = st.session_state.active_nav == label
-    if col.button(icon, key=f"nav_{label}", use_container_width=True,
-                  type="primary" if is_active else "secondary", help=label):
+    if col.button(f"{icon}\n{label}", key=f"nav_{label}", use_container_width=True,
+                  type="primary" if is_active else "secondary"):
         st.session_state.active_nav = label
         st.rerun()
 
-st.caption(f"**{st.session_state.active_nav}**")
 st.divider()
 
 
