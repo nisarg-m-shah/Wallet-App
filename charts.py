@@ -13,7 +13,7 @@ import plotly.graph_objects as go
 PALETTE = ["#6C5CE7", "#00B894", "#0984E3", "#E17055", "#FDCB6E",
            "#D63031", "#00CEC9", "#E84393", "#2D3436", "#0057B8"]
 
-FONT = dict(family="Inter, -apple-system, sans-serif", size=13, color="#2D3436")
+FONT = dict(family="Inter, -apple-system, sans-serif", size=13, color="#EDEEF2")
 
 
 def _base_layout(fig: go.Figure, height: int = 320, title: str | None = None) -> go.Figure:
@@ -23,9 +23,9 @@ def _base_layout(fig: go.Figure, height: int = 320, title: str | None = None) ->
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
         font=FONT,
-        title=dict(text=title, x=0.02, font=dict(size=15, color="#2D3436")) if title else None,
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-        hoverlabel=dict(bgcolor="white", font_size=12),
+        title=dict(text=title, x=0.02, font=dict(size=15, color="#EDEEF2")) if title else None,
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1, font=dict(color="#EDEEF2")),
+        hoverlabel=dict(bgcolor="#1B1E29", font_size=12, font_color="#EDEEF2"),
     )
     return fig
 

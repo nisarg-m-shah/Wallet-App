@@ -54,8 +54,8 @@ def render_auth_screen() -> None:
     st.markdown(
         "<div style='text-align:center; margin-top:3rem;'>"
         "<div style='font-size:42px;'>\U0001F4B0</div>"
-        "<div style='font-size:26px; font-weight:800; color:#2D3436;'>Wallet Tracker</div>"
-        "<div style='color:#8395A7; margin-bottom:2rem;'>Your money, minus the spreadsheet.</div>"
+        "<div style='font-size:26px; font-weight:800; color:#EDEEF2;'>Wallet Tracker</div>"
+        "<div style='color:#9096A8; margin-bottom:2rem;'>Your money, minus the spreadsheet.</div>"
         "</div>",
         unsafe_allow_html=True,
     )
@@ -444,7 +444,7 @@ for r in sw["records"][:5]:
     verb = "You owe" if r["kind"] == "Debt" else "Owes you"
     st.markdown(
         f"<div class='{css_class}'><b>{r['person']}</b><br>"
-        f"<span style='font-size:13px;color:#636E72;'>{verb}</span> "
+        f"<span style='font-size:13px;color:#9096A8;'>{verb}</span> "
         f"<b>{format_currency(r['amount'])}</b></div>",
         unsafe_allow_html=True,
     )
