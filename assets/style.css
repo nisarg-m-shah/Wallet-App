@@ -110,10 +110,30 @@ div[data-testid="stButton"] > button[kind="primary"]:hover {
 .timeline-meta { font-size: 12px; color: #8395A7; margin-top: 2px; }
 .timeline-amount { font-weight: 700; font-size: 14.5px; }
 
-/* ---------- Sidebar ---------- */
+/* ---------- Sidebar (hidden - nav lives in top bar now) ---------- */
 section[data-testid="stSidebar"] {
-    background: #F9FAFC;
-    border-right: 1px solid rgba(45,52,54,0.06);
+    display: none;
+}
+
+/* ---------- Top nav bar ---------- */
+div[data-testid="stHorizontalBlock"]:has(button[kind="primary"][title]),
+div[data-testid="stHorizontalBlock"] {
+    gap: 6px;
+}
+div[data-testid="stButton"] > button[title] {
+    font-size: 20px;
+    padding: 0.5rem 0.25rem;
+    border-radius: 12px;
+}
+
+@media (max-width: 640px) {
+    .block-container {
+        padding-left: 0.8rem;
+        padding-right: 0.8rem;
+        padding-top: 0.8rem;
+    }
+    .metric-value { font-size: 20px; }
+    .metric-card { padding: 14px 16px; }
 }
 
 /* ---------- Account chips ---------- */

@@ -531,6 +531,18 @@ def add_splitwise_loan(user_id: int, person: str, amount: float, notes: str) -> 
     return True, "Loan recorded."
 
 
+def add_splitwise_debt(user_id: int, person: str, amount: float, notes: str) -> tuple[bool, str]:
+    """Record money I owe someone else directly (not tied to an expense)."""
+    if amount <= 0:
+        return False, "Amount must be greater than zero."
+    with get_session() as session:
+        session.add(SplitwiseRecord(
+            user_id=user_id, person=person, amount=amount, kind=SplitwiseKind.DEBT,
+            date=dt.datetime.utcnow(), notes=notes,
+        ))
+    return True, "Debt recorded."
+
+
 def settle_splitwise_record(user_id: int, record_id: int) -> tuple[bool, str]:
     with get_session() as session:
         rec = session.query(SplitwiseRecord).filter(
