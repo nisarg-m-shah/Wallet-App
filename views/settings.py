@@ -1,10 +1,10 @@
-
 """views/settings.py - Manage categories and view account/profile info."""
 from __future__ import annotations
 
 import streamlit as st
 
 import services
+from database import DB_BACKEND
 from utils import ACCOUNT_ICONS
 
 
@@ -14,6 +14,21 @@ def render(user_id: int, user: dict) -> None:
     st.markdown("### Profile")
     st.write(f"**Name:** {user['display_name']}")
     st.write(f"**Email:** {user['email']}")
+
+    st.divider()
+    st.markdown("### Storage")
+    if DB_BACKEND == "postgres":
+        st.success("Connected to Postgres - your data persists across app reboots/redeploys.")
+    else:
+        st.error(
+            "\U000026A0\U0000FE0F Running on local SQLite, NOT Postgres. "
+            "On Streamlit Community Cloud this file is wiped every time the app "
+            "goes to sleep and reboots - which is almost certainly why transactions "
+            "have been disappearing. This means `DATABASE_URL` isn't being read from "
+            "Streamlit Cloud's Secrets manager. Go to your app -> Settings -> Secrets "
+            "and confirm `DATABASE_URL = \"postgresql://...\"` is saved there (not just "
+            "in your local `.streamlit/secrets.toml`, which never gets deployed)."
+        )
 
     st.divider()
     st.markdown("### Categories")
