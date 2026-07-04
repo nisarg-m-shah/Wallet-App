@@ -110,6 +110,7 @@ def category_trend_line(df: pd.DataFrame, kind: str = "Expense") -> go.Figure:
     return _base_layout(fig, title=f"{kind} Trend")
 
 
+
 def largest_transactions_bar(df: pd.DataFrame, kind: str = "Expense", n: int = 10) -> go.Figure:
     if df.empty:
         return empty_state("No data yet")
@@ -123,7 +124,7 @@ def largest_transactions_bar(df: pd.DataFrame, kind: str = "Expense", n: int = 1
     d.loc[empty_mask, "label"] = d.loc[empty_mask, "category"]
     fig = px.bar(d.sort_values("amount"), x="amount", y="label", orientation="h",
                  color_discrete_sequence=[PALETTE[3] if kind == "Expense" else PALETTE[1]])
-    return _base_layout(fig, title=f"Largest {kind}s", height=380)
+    return _base_layout(fig, title=f"Largest {kind}s", height=380) 
 
 def empty_state(message: str) -> go.Figure:
     fig = go.Figure()
