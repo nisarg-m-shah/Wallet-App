@@ -8,16 +8,18 @@ through here; `views/*.py` expose plain `render(user_id)` functions instead
 of being separate auto-detected Streamlit pages.
 """
 from __future__ import annotations
-import extra_streamlit_components as stx
 
 import datetime as dt
 import os
 
+import pandas as pd
 import streamlit as st
 
 import auth
 import charts
+import extra_streamlit_components as stx
 import services
+import session_auth
 from database import init_db
 from utils import (
     format_currency,
@@ -30,9 +32,6 @@ from views import analytics as view_analytics
 from views import recurring as view_recurring
 from views import settings as view_settings
 from views import transactions as view_transactions
-
-import pandas as pd
-import session_auth
 
 st.set_page_config(page_title="Wallet Tracker", page_icon="\U0001F4B0", layout="centered", initial_sidebar_state="collapsed")
 
@@ -55,7 +54,6 @@ st.markdown("<style>section[data-testid='stSidebar'] {display:none;}</style>", u
 # Persistent login: Streamlit's session_state resets on every page reload,
 # so "remember me" is implemented via a signed token in a browser cookie.
 # --------------------------------------------------------------------------- #
-
 cookie_manager = stx.CookieManager(key="wallet_cookie_manager")
 COOKIE_NAME = "wallet_session"
 
@@ -102,55 +100,6 @@ def render_auth_screen() -> None:
             ok, msg, user = auth.log_in(email, password)
             if ok:
                 _remember_login(user)
-                st.rerun()
-            else:
-                st.error(msg)
-
-    with tab_signup:
-        with st.form("signup_form"):
-            name = st.text_input("Name")
-            email_s = st.text_input("Email", key="signup_email")
-            password_s = st.text_input("Password", type="password", key="signup_pw",
-                                        help="At least 8 characters")
-            submitted_s = st.form_submit_button("Create Account", type="primary", use_container_width=True)
-        if submitted_s:
-            ok, msg = auth.sign_up(email_s, password_s, name)
-            if ok:
-                st.success(msg + " Please log in.")
-            else:
-                st.error(msg)
-
-
-if "user" not in st.session_state:
-    render_auth_screen()
-    st.stop()
-
-USER = st.session_state.user
-USER_ID = USER["id"]
-
-# --------------------------------------------------------------------------- #
-# Auth gate
-# --------------------------------------------------------------------------- #
-def render_auth_screen() -> None:
-    st.markdown(
-        "<div style='text-align:center; margin-top:3rem;'>"
-        "<div style='font-size:42px;'>\U0001F4B0</div>"
-        "<div style='font-size:26px; font-weight:800; color:#EDEEF2;'>Wallet Tracker</div>"
-        "<div style='color:#9096A8; margin-bottom:2rem;'>Your money, minus the spreadsheet.</div>"
-        "</div>",
-        unsafe_allow_html=True,
-    )
-    tab_login, tab_signup = st.tabs(["Log In", "Sign Up"])
-
-    with tab_login:
-        with st.form("login_form"):
-            email = st.text_input("Email")
-            password = st.text_input("Password", type="password")
-            submitted = st.form_submit_button("Log In", type="primary", use_container_width=True)
-        if submitted:
-            ok, msg, user = auth.log_in(email, password)
-            if ok:
-                st.session_state.user = user
                 st.rerun()
             else:
                 st.error(msg)
@@ -361,22 +310,75 @@ def recurring_dialog():
 @st.dialog("\U0001F91D Splitwise")
 def splitwise_dialog():
     st.caption("Split it now, sort it out later.")
-    tab1, tab2, tab3 = st.tabs(["Owed to me", "I owe someone", "Settle a debt"])
+    tab_split, tab_lend, tab_owe, tab_settle, tab_payback = st.tabs(
+        ["Split a Bill", "Lend Money", "I Owe Someone", "Pay Off Debt", "Received Payback"]
+    )
 
-    with tab1:
-        st.write("Record money you lent to a friend (outside of an expense).")
+    with tab_split:
+        st.write("You paid the full bill, but only your share is really your expense - "
+                 "everyone else's share becomes money owed to you, and won't count "
+                 "toward your expense totals.")
+        if not account_options:
+            st.warning("Create an account first.")
+        else:
+            total = st.number_input("Total bill amount", min_value=0.0, step=50.0, format="%.2f", key="split_total")
+            your_share = st.number_input("Your share", min_value=0.0, step=50.0, format="%.2f", key="split_share")
+            desc = st.text_input("Description", placeholder="e.g. Team dinner", key="split_desc")
+            cat_label = st.selectbox("Category", list(expense_cat_options.keys()), key="split_cat")
+            acc_label = st.selectbox("Paid from", list(account_options.keys()), key="split_acc")
+            mode = st.selectbox("Payment Mode", PAYMENT_MODES, key="split_mode")
+            c1, c2 = st.columns(2)
+            sdate = c1.date_input("Date", value=dt.date.today(), key="split_date")
+            stime = c2.time_input("Time", value=dt.datetime.now().time(), key="split_time")
+
+            st.caption("Who else owes you, and how much? (add as many rows as you need)")
+            splits_df = st.data_editor(
+                pd.DataFrame([{"Person": "", "Amount": 0.0}]),
+                num_rows="dynamic", use_container_width=True, key="split_editor", hide_index=True,
+                column_config={"Amount": st.column_config.NumberColumn(min_value=0.0, step=50.0, format="%.2f")},
+            )
+            others_total = float(splits_df["Amount"].fillna(0).sum()) if not splits_df.empty else 0.0
+            running_total = your_share + others_total
+            mismatch = round(running_total, 2) != round(total, 2)
+            st.caption(
+                f"Your share + others = {format_currency(running_total)}  "
+                f"{'\u26A0\uFE0F does not match total of ' + format_currency(total) if mismatch and total > 0 else ''}"
+            )
+
+            if st.button("Save Split Expense", type="primary", use_container_width=True, key="split_save"):
+                splits = [
+                    (r["Person"], float(r["Amount"])) for _, r in splits_df.iterrows()
+                    if r["Person"] and r["Amount"] and r["Amount"] > 0
+                ]
+                ok, msg = services.add_split_expense(
+                    USER_ID, total, your_share, account_options[acc_label],
+                    expense_cat_options[cat_label], desc, dt.datetime.combine(sdate, stime), mode, splits,
+                )
+                if ok:
+                    st.toast(msg, icon="\U00002705")
+                    st.rerun()
+                else:
+                    st.error(msg)
+
+    with tab_lend:
+        st.write("Record money you lent to a friend. If it came out of one of your "
+                 "accounts, pick it below and the balance updates in the same step - "
+                 "no separate expense entry needed.")
         person = st.text_input("Friend's name", key="sw_loan_person")
         amount = st.number_input("Amount", min_value=0.0, step=50.0, format="%.2f", key="sw_loan_amt")
+        source_options = ["Cash / untracked"] + list(account_options.keys())
+        source_label = st.selectbox("Where did this money come from?", source_options, key="sw_loan_source")
         notes = st.text_input("Notes", key="sw_loan_notes")
         if st.button("Record Loan", type="primary", use_container_width=True, key="sw_loan_save"):
-            ok, msg = services.add_splitwise_loan(USER_ID, person, amount, notes)
+            source_account_id = account_options.get(source_label) if source_label != "Cash / untracked" else None
+            ok, msg = services.add_loan(USER_ID, person, amount, notes, dt.datetime.utcnow(), source_account_id)
             if ok:
                 st.toast(msg, icon="\U00002705")
                 st.rerun()
             else:
                 st.error(msg)
 
-    with tab2:
+    with tab_owe:
         st.write("Record money you owe a friend directly - not tied to an expense "
                  "(e.g. they covered a bill outright, or a personal loan).")
         person2 = st.text_input("Friend's name", key="sw_debt_person")
@@ -390,8 +392,8 @@ def splitwise_dialog():
             else:
                 st.error(msg)
 
-    with tab3:
-        st.write("Settling a debt moves money from a real account into Splitwise, "
+    with tab_settle:
+        st.write("Paying off what you owe moves money from a real account into Splitwise, "
                  "clearing your outstanding balance automatically (oldest first).")
         if account_options:
             amount3 = st.number_input("Amount to settle", min_value=0.0, step=50.0, format="%.2f", key="sw_settle_amt")
@@ -401,6 +403,24 @@ def splitwise_dialog():
                 ok, msg = services.add_transfer(
                     USER_ID, amount3, account_options[from_label3], sw_acc.id, dt.datetime.utcnow(),
                     "Splitwise settlement",
+                )
+                if ok:
+                    st.toast(msg, icon="\U00002705")
+                    st.rerun()
+                else:
+                    st.error(msg)
+
+    with tab_payback:
+        st.write("Someone paid you back - this deposits the money into a real account "
+                 "and clears the oldest amounts owed to you first.")
+        if account_options:
+            amount4 = st.number_input("Amount received", min_value=0.0, step=50.0, format="%.2f", key="sw_payback_amt")
+            to_label4 = st.selectbox("Deposit into", list(account_options.keys()), key="sw_payback_acc")
+            if st.button("Record Payback", type="primary", use_container_width=True, key="sw_payback_save"):
+                sw_acc = services.get_splitwise_account(USER_ID)
+                ok, msg = services.add_transfer(
+                    USER_ID, amount4, sw_acc.id, account_options[to_label4], dt.datetime.utcnow(),
+                    "Splitwise payback",
                 )
                 if ok:
                     st.toast(msg, icon="\U00002705")
