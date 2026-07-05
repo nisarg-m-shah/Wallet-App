@@ -22,9 +22,12 @@ import services
 import session_auth
 from database import init_db
 from utils import (
+    DEFAULT_PAYERS,
+    PAYMENT_MODES,
     format_currency,
     format_signed_currency,
     group_transactions_by_day,
+    now_ist,
     transaction_line_icon,
 )
 from views import accounts as view_accounts
@@ -188,8 +191,7 @@ income_categories = services.get_categories(USER_ID, kind="Income")
 expense_cat_options = {f"{c['icon']} {c['name']}": c["id"] for c in expense_categories}
 income_cat_options = {f"{c['icon']} {c['name']}": c["id"] for c in income_categories}
 
-PAYMENT_MODES = ["Cash", "UPI", "Splitwise", "Debit Card", "Netbanking"]
-DEFAULT_PAYERS = ["Mom", "Dad", "Pravis Consulting", "Aaryann Mavani", "Other"]
+
 
 
 # --------------------------------------------------------------------------- #
@@ -207,8 +209,8 @@ def expense_dialog():
     c1, c2 = st.columns(2)
     # Explicit keys + no upper bound, so any past date/time can be selected -
     # this is what lets you log an expense days after it actually happened.
-    date = c1.date_input("Date", value=dt.date.today(), key="exp_date")
-    time = c2.time_input("Time", value=dt.datetime.now().time(), key="exp_time")
+    date = c1.date_input("Date", value=now_ist().date(), key="exp_date")
+    time = c2.time_input("Time", value=now_ist().time(), key="exp_time")
     payment_mode = st.selectbox("Payment Mode", PAYMENT_MODES, key="exp_mode")
     account_label = st.selectbox("Account", list(account_options.keys()), key="exp_acc")
     payee = st.text_input("Payee", placeholder="Who did you pay?", key="exp_payee")
@@ -239,8 +241,8 @@ def income_dialog():
     category_label = st.selectbox("Category", list(income_cat_options.keys()), key="inc_cat")
     payment_mode = st.selectbox("Payment Mode", PAYMENT_MODES, key="inc_mode")
     c1, c2 = st.columns(2)
-    date = c1.date_input("Date", value=dt.date.today(), key="inc_date")
-    time = c2.time_input("Time", value=dt.datetime.now().time(), key="inc_time")
+    date = c1.date_input("Date", value=now_ist().date(), key="inc_date")
+    time = c2.time_input("Time", value=now_ist().time(), key="inc_time")
     account_label = st.selectbox("Account", list(account_options.keys()), key="inc_acc")
 
     if st.button("Save Income", type="primary", use_container_width=True, key="inc_save"):
@@ -265,8 +267,8 @@ def transfer_dialog():
     from_label = st.selectbox("From Account", list(account_options.keys()), key="tr_from")
     to_label = st.selectbox("To Account", list(account_options.keys()), key="tr_to")
     c1, c2 = st.columns(2)
-    date = c1.date_input("Date", value=dt.date.today(), key="tr_date")
-    time = c2.time_input("Time", value=dt.datetime.now().time(), key="tr_time")
+    date = c1.date_input("Date", value=now_ist().date(), key="tr_date")
+    time = c2.time_input("Time", value=now_ist().time(), key="tr_time")
     notes = st.text_input("Notes", key="tr_notes")
 
     if st.button("Save Transfer", type="primary", use_container_width=True, key="tr_save"):
@@ -290,7 +292,7 @@ def recurring_dialog():
     amount = st.number_input("Amount", min_value=0.0, step=50.0, format="%.2f", key="rec_amt")
     description = st.text_input("Description", key="rec_desc")
     frequency = st.selectbox("Frequency", ["Daily", "Weekly", "Monthly", "Yearly"], key="rec_freq")
-    first_date = st.date_input("First Payment Date", value=dt.date.today(), key="rec_date")
+    first_date = st.date_input("First Payment Date", value=now_ist().date(), key="rec_date")
     category_label = st.selectbox("Category", list(expense_cat_options.keys()), key="rec_cat")
     account_label = st.selectbox("Account", list(account_options.keys()), key="rec_acc")
 
@@ -328,8 +330,8 @@ def splitwise_dialog():
             acc_label = st.selectbox("Paid from", list(account_options.keys()), key="split_acc")
             mode = st.selectbox("Payment Mode", PAYMENT_MODES, key="split_mode")
             c1, c2 = st.columns(2)
-            sdate = c1.date_input("Date", value=dt.date.today(), key="split_date")
-            stime = c2.time_input("Time", value=dt.datetime.now().time(), key="split_time")
+            sdate = c1.date_input("Date", value=now_ist().date(), key="split_date")
+            stime = c2.time_input("Time", value=now_ist().time(), key="split_time")
 
             st.caption("Who else owes you, and how much? (add as many rows as you need)")
             splits_df = st.data_editor(
@@ -368,10 +370,15 @@ def splitwise_dialog():
         amount = st.number_input("Amount", min_value=0.0, step=50.0, format="%.2f", key="sw_loan_amt")
         source_options = ["Cash / untracked"] + list(account_options.keys())
         source_label = st.selectbox("Where did this money come from?", source_options, key="sw_loan_source")
+        c1, c2 = st.columns(2)
+        loan_date = c1.date_input("Date", value=now_ist().date(), key="sw_loan_date")
+        loan_time = c2.time_input("Time", value=now_ist().time(), key="sw_loan_time")
         notes = st.text_input("Notes", key="sw_loan_notes")
         if st.button("Record Loan", type="primary", use_container_width=True, key="sw_loan_save"):
             source_account_id = account_options.get(source_label) if source_label != "Cash / untracked" else None
-            ok, msg = services.add_loan(USER_ID, person, amount, notes, dt.datetime.utcnow(), source_account_id)
+            ok, msg = services.add_loan(
+                USER_ID, person, amount, notes, dt.datetime.combine(loan_date, loan_time), source_account_id,
+            )
             if ok:
                 st.toast(msg, icon="\U00002705")
                 st.rerun()
@@ -383,9 +390,14 @@ def splitwise_dialog():
                  "(e.g. they covered a bill outright, or a personal loan).")
         person2 = st.text_input("Friend's name", key="sw_debt_person")
         amount2b = st.number_input("Amount", min_value=0.0, step=50.0, format="%.2f", key="sw_debt_amt")
+        c1, c2 = st.columns(2)
+        debt_date = c1.date_input("Date", value=now_ist().date(), key="sw_debt_date")
+        debt_time = c2.time_input("Time", value=now_ist().time(), key="sw_debt_time")
         notes2 = st.text_input("Notes", key="sw_debt_notes")
         if st.button("Record Debt", type="primary", use_container_width=True, key="sw_debt_save"):
-            ok, msg = services.add_splitwise_debt(USER_ID, person2, amount2b, notes2)
+            ok, msg = services.add_splitwise_debt(
+                USER_ID, person2, amount2b, notes2, dt.datetime.combine(debt_date, debt_time),
+            )
             if ok:
                 st.toast(msg, icon="\U00002705")
                 st.rerun()
@@ -398,11 +410,14 @@ def splitwise_dialog():
         if account_options:
             amount3 = st.number_input("Amount to settle", min_value=0.0, step=50.0, format="%.2f", key="sw_settle_amt")
             from_label3 = st.selectbox("Pay from", list(account_options.keys()), key="sw_settle_acc")
+            c1, c2 = st.columns(2)
+            settle_date = c1.date_input("Date", value=now_ist().date(), key="sw_settle_date")
+            settle_time = c2.time_input("Time", value=now_ist().time(), key="sw_settle_time")
             if st.button("Settle via Transfer", type="primary", use_container_width=True, key="sw_settle_save"):
                 sw_acc = services.get_splitwise_account(USER_ID)
                 ok, msg = services.add_transfer(
-                    USER_ID, amount3, account_options[from_label3], sw_acc.id, dt.datetime.utcnow(),
-                    "Splitwise settlement",
+                    USER_ID, amount3, account_options[from_label3], sw_acc.id,
+                    dt.datetime.combine(settle_date, settle_time), "Splitwise settlement",
                 )
                 if ok:
                     st.toast(msg, icon="\U00002705")
@@ -416,11 +431,14 @@ def splitwise_dialog():
         if account_options:
             amount4 = st.number_input("Amount received", min_value=0.0, step=50.0, format="%.2f", key="sw_payback_amt")
             to_label4 = st.selectbox("Deposit into", list(account_options.keys()), key="sw_payback_acc")
+            c1, c2 = st.columns(2)
+            payback_date = c1.date_input("Date", value=now_ist().date(), key="sw_payback_date")
+            payback_time = c2.time_input("Time", value=now_ist().time(), key="sw_payback_time")
             if st.button("Record Payback", type="primary", use_container_width=True, key="sw_payback_save"):
                 sw_acc = services.get_splitwise_account(USER_ID)
                 ok, msg = services.add_transfer(
-                    USER_ID, amount4, sw_acc.id, account_options[to_label4], dt.datetime.utcnow(),
-                    "Splitwise payback",
+                    USER_ID, amount4, sw_acc.id, account_options[to_label4],
+                    dt.datetime.combine(payback_date, payback_time), "Splitwise payback",
                 )
                 if ok:
                     st.toast(msg, icon="\U00002705")
@@ -440,8 +458,8 @@ def adjust_balance_dialog():
     st.metric("Current Balance", format_currency(current["balance"], current["currency"]))
     new_balance = st.number_input("New Balance", step=50.0, format="%.2f", key="adj_new")
     c1, c2 = st.columns(2)
-    date = c1.date_input("Date", value=dt.date.today(), key="adj_date")
-    time = c2.time_input("Time", value=dt.datetime.now().time(), key="adj_time")
+    date = c1.date_input("Date", value=now_ist().date(), key="adj_date")
+    time = c2.time_input("Time", value=now_ist().time(), key="adj_time")
     reason = st.text_input("Reason", placeholder="e.g. Bank statement reconciliation", key="adj_reason")
 
     if st.button("Save Adjustment", type="primary", use_container_width=True, key="adj_save"):

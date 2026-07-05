@@ -97,6 +97,7 @@ class Account(Base):
     name: Mapped[str] = mapped_column(String(120))
     type: Mapped[AccountType] = mapped_column(Enum(AccountType))
     balance: Mapped[float] = mapped_column(Float, default=0.0)
+    opening_balance: Mapped[float | None] = mapped_column(Float, nullable=True)
     currency: Mapped[str] = mapped_column(String(10), default="INR")
     color: Mapped[str] = mapped_column(String(20), default="#6C5CE7")
     icon: Mapped[str] = mapped_column(String(10), default="\U0001F4B3")  # 💳

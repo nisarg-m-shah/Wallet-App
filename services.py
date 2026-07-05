@@ -16,6 +16,7 @@ from dateutil.relativedelta import relativedelta
 from sqlalchemy import func
 
 from database import get_session
+from utils import now_ist
 from models import (
     Account,
     AccountType,
@@ -82,7 +83,7 @@ def create_account(user_id: int, name: str, type_: str, balance: float, currency
             return False, "An account with this name already exists."
         session.add(Account(
             user_id=user_id, name=name.strip(), type=AccountType(type_), balance=balance,
-            currency=currency, color=color, icon=icon, notes=notes,
+            opening_balance=balance, currency=currency, color=color, icon=icon, notes=notes,
         ))
     return True, "Account created."
 
@@ -101,10 +102,60 @@ def archive_account(user_id: int, account_id: int) -> None:
     update_account(user_id, account_id, is_archived=True)
 
 
-def _adjust_balance(session, account_id: int, delta: float) -> None:
+def _compute_balance_as_of(session, account_id: int, as_of_date: dt.datetime) -> float:
+    """
+    What this account's balance would be at as_of_date, using the most recent
+    balance-adjustment checkpoint dated on/before as_of_date as a baseline,
+    then adding every transaction dated after that checkpoint (and on/before
+    as_of_date). This is what makes backdating safe: a transaction dated
+    before the last checkpoint has zero effect on the current balance,
+    because the checkpoint already captured the true balance as of that date.
+    """
+    last_adj = session.query(BalanceAdjustment).filter(
+        BalanceAdjustment.account_id == account_id,
+        BalanceAdjustment.date <= as_of_date,
+    ).order_by(BalanceAdjustment.date.desc()).first()
+
+    if last_adj:
+        baseline = last_adj.new_balance
+        baseline_date = last_adj.date
+    else:
+        acc = session.query(Account).filter(Account.id == account_id).first()
+        baseline = (acc.opening_balance if acc and acc.opening_balance is not None else 0.0)
+        baseline_date = dt.datetime.min
+
+    txns = session.query(Transaction).filter(
+        Transaction.date > baseline_date,
+        Transaction.date <= as_of_date,
+    ).filter(
+        (Transaction.account_id == account_id) | (Transaction.to_account_id == account_id)
+    ).all()
+
+    delta_sum = 0.0
+    for t in txns:
+        if t.account_id == account_id:
+            if t.type == TransactionType.EXPENSE:
+                delta_sum -= t.amount
+            elif t.type == TransactionType.INCOME:
+                delta_sum += t.amount
+            elif t.type == TransactionType.TRANSFER:
+                delta_sum -= t.amount
+        if t.to_account_id == account_id and t.type == TransactionType.TRANSFER:
+            delta_sum += t.amount
+
+    return round(baseline + delta_sum, 2)
+
+
+def _recompute_account_balance(session, account_id: int | None) -> None:
+    """Recalculate and store an account's current balance from scratch. Call
+    this after any insert/delete/edit that could affect it - it's always
+    correct regardless of what order things were entered in."""
+    if account_id is None:
+        return
     acc = session.query(Account).filter(Account.id == account_id).first()
-    if acc:
-        acc.balance = round(acc.balance + delta, 2)
+    if not acc:
+        return
+    acc.balance = _compute_balance_as_of(session, account_id, dt.datetime.max)
 
 
 # --------------------------------------------------------------------------- #
@@ -161,7 +212,7 @@ def add_expense(user_id: int, amount: float, description: str, category_id: int 
         session.add(txn)
         session.flush()
 
-        _adjust_balance(session, txn_account_id, -amount)
+        _recompute_account_balance(session, txn_account_id)
 
         if is_splitwise:
             session.add(SplitwiseRecord(
@@ -189,7 +240,8 @@ def add_income(user_id: int, amount: float, description: str, payer: str, catego
             account_id=account_id, date=date,
         )
         session.add(txn)
-        _adjust_balance(session, account_id, amount)
+        session.flush()
+        _recompute_account_balance(session, account_id)
 
     return True, "Income added."
 
@@ -212,9 +264,10 @@ def add_transfer(user_id: int, amount: float, from_account_id: int, to_account_i
             account_id=from_account_id, to_account_id=to_account_id, date=date, notes=notes,
         )
         session.add(txn)
+        session.flush()
 
-        _adjust_balance(session, from_account_id, -amount)
-        _adjust_balance(session, to_account_id, amount)
+        _recompute_account_balance(session, from_account_id)
+        _recompute_account_balance(session, to_account_id)
 
         # If this transfer settles a Splitwise liability (money moving INTO the
         # clearing account = you paying off what you owe), or collects a
@@ -279,26 +332,50 @@ def adjust_balance(user_id: int, account_id: int, new_balance: float, date: dt.d
         if not acc:
             return False, "Invalid account."
 
-        old_balance = acc.balance
+        # What the balance *should* have been at this date, given everything
+        # already recorded - not just whatever the live balance happens to
+        # show right now. This is what makes it safe to add a backdated
+        # adjustment after already logging other transactions.
+        old_balance_as_of = _compute_balance_as_of(session, account_id, date)
+        delta = round(new_balance - old_balance_as_of, 2)
+
         session.add(BalanceAdjustment(
-            user_id=user_id, account_id=account_id, old_balance=old_balance,
+            user_id=user_id, account_id=account_id, old_balance=old_balance_as_of,
             new_balance=new_balance, reason=reason, date=date,
         ))
-        acc.balance = new_balance
+        session.flush()
 
-        txn = Transaction(
-            user_id=user_id, type=TransactionType.ADJUSTMENT,
-            amount=round(new_balance - old_balance, 2),
-            description=f"Balance adjustment: {reason}" if reason else "Balance adjustment",
-            account_id=account_id, date=date,
-        )
-        session.add(txn)
+        if delta != 0:
+            is_deficit = delta < 0
+            cat_kind = CategoryKind.EXPENSE if is_deficit else CategoryKind.INCOME
+            cat_name = "Balancing Expense" if is_deficit else "Balancing Income"
+            cat = session.query(Category).filter(
+                Category.user_id == user_id, Category.name == cat_name, Category.kind == cat_kind
+            ).first()
+            if not cat:
+                cat = Category(user_id=user_id, name=cat_name, kind=cat_kind,
+                                icon="\u2696\uFE0F", is_system=True)
+                session.add(cat)
+                session.flush()
+
+            session.add(Transaction(
+                user_id=user_id,
+                type=TransactionType.EXPENSE if is_deficit else TransactionType.INCOME,
+                amount=abs(delta), category_id=cat.id,
+                description=f"Balance adjustment: {reason}" if reason else "Balance adjustment",
+                account_id=account_id, date=date,
+            ))
+            session.flush()
+
+        _recompute_account_balance(session, account_id)
 
     return True, "Balance adjusted."
 
 
 def delete_transaction(user_id: int, transaction_id: int) -> tuple[bool, str]:
-    """Delete a transaction and reverse its effect on account balances."""
+    """Delete a transaction. Balances are recalculated from scratch afterward,
+    so this is correct regardless of the transaction's date relative to
+    others - no manual reversal math needed."""
     with get_session() as session:
         txn = session.query(Transaction).filter(
             Transaction.id == transaction_id, Transaction.user_id == user_id
@@ -306,23 +383,18 @@ def delete_transaction(user_id: int, transaction_id: int) -> tuple[bool, str]:
         if not txn:
             return False, "Transaction not found."
 
-        if txn.type == TransactionType.EXPENSE:
-            _adjust_balance(session, txn.account_id, txn.amount)
-        elif txn.type == TransactionType.INCOME:
-            _adjust_balance(session, txn.account_id, -txn.amount)
-        elif txn.type == TransactionType.TRANSFER:
-            _adjust_balance(session, txn.account_id, txn.amount)
-            _adjust_balance(session, txn.to_account_id, -txn.amount)
-        elif txn.type == TransactionType.ADJUSTMENT:
-            # Reverting an adjustment: subtract the delta that was applied
-            _adjust_balance(session, txn.account_id, -txn.amount)
-
+        account_id = txn.account_id
+        to_account_id = txn.to_account_id
         session.delete(txn)
+        session.flush()
+
+        _recompute_account_balance(session, account_id)
+        _recompute_account_balance(session, to_account_id)
 
     return True, "Transaction deleted."
 
 
-def duplicate_transaction(user_id: int, transaction_id: int) -> tuple[bool, str]:
+def duplicate_transaction(user_id: int, transaction_id: int, new_date: dt.datetime | None = None) -> tuple[bool, str]:
     with get_session() as session:
         txn = session.query(Transaction).filter(
             Transaction.id == transaction_id, Transaction.user_id == user_id
@@ -330,15 +402,17 @@ def duplicate_transaction(user_id: int, transaction_id: int) -> tuple[bool, str]
         if not txn:
             return False, "Transaction not found."
 
+        use_date = new_date or now_ist()
+
         if txn.type == TransactionType.EXPENSE:
             return add_expense(user_id, txn.amount, txn.description, txn.category_id,
-                                dt.datetime.utcnow(), txn.payment_mode, txn.account_id, txn.payee)
+                                use_date, txn.payment_mode, txn.account_id, txn.payee)
         elif txn.type == TransactionType.INCOME:
             return add_income(user_id, txn.amount, txn.description, txn.payee, txn.category_id,
-                               txn.payment_mode, dt.datetime.utcnow(), txn.account_id)
+                               txn.payment_mode, use_date, txn.account_id)
         elif txn.type == TransactionType.TRANSFER:
             return add_transfer(user_id, txn.amount, txn.account_id, txn.to_account_id,
-                                 dt.datetime.utcnow(), txn.notes)
+                                 use_date, txn.notes)
         return False, "This transaction type cannot be duplicated."
 
 
@@ -486,7 +560,7 @@ def process_due_recurring_payments(user_id: int) -> int:
     has arrived, then roll the due date forward. Call this once per app load.
     Returns the number of transactions generated.
     """
-    now = dt.datetime.utcnow()
+    now = now_ist()
     generated = 0
 
     with get_session() as session:
@@ -556,7 +630,7 @@ def add_loan(user_id: int, person: str, amount: float, notes: str,
     """
     if amount <= 0:
         return False, "Amount must be greater than zero."
-    date = date or dt.datetime.utcnow()
+    date = date or now_ist()
 
     with get_session() as session:
         if account_id is not None:
@@ -566,13 +640,14 @@ def add_loan(user_id: int, person: str, amount: float, notes: str,
             sw_acc = session.query(Account).filter(
                 Account.user_id == user_id, Account.type == AccountType.SPLITWISE
             ).first()
-            _adjust_balance(session, account_id, -amount)
-            _adjust_balance(session, sw_acc.id, amount)
             session.add(Transaction(
                 user_id=user_id, type=TransactionType.TRANSFER, amount=amount,
                 description=f"Lent to {person}", account_id=account_id, to_account_id=sw_acc.id,
                 date=date, notes=notes,
             ))
+            session.flush()
+            _recompute_account_balance(session, account_id)
+            _recompute_account_balance(session, sw_acc.id)
 
         session.add(SplitwiseRecord(
             user_id=user_id, person=person, amount=amount, kind=SplitwiseKind.LOAN,
@@ -617,18 +692,20 @@ def add_split_expense(user_id: int, total_amount: float, your_share: float, acco
                 description=description, category_id=category_id, payment_mode=payment_mode,
                 account_id=account_id, date=date,
             ))
-            _adjust_balance(session, account_id, -your_share)
+            session.flush()
+            _recompute_account_balance(session, account_id)
 
         # Everyone else's shares -> money advanced on their behalf, parked in the
         # Splitwise clearing account. Not an expense of yours.
         if others_total > 0:
-            _adjust_balance(session, account_id, -others_total)
-            _adjust_balance(session, sw_acc.id, others_total)
             session.add(Transaction(
                 user_id=user_id, type=TransactionType.TRANSFER, amount=others_total,
                 description=f"Advanced for: {description}", account_id=account_id,
                 to_account_id=sw_acc.id, date=date,
             ))
+            session.flush()
+            _recompute_account_balance(session, account_id)
+            _recompute_account_balance(session, sw_acc.id)
             for person, amt in splits:
                 if not amt or amt <= 0:
                     continue
@@ -644,14 +721,15 @@ def format_currency_plain(amount: float) -> str:
     return f"\u20B9{amount:,.2f}"
 
 
-def add_splitwise_debt(user_id: int, person: str, amount: float, notes: str) -> tuple[bool, str]:
+def add_splitwise_debt(user_id: int, person: str, amount: float, notes: str,
+                        date: dt.datetime | None = None) -> tuple[bool, str]:
     """Record money I owe someone else directly (not tied to an expense)."""
     if amount <= 0:
         return False, "Amount must be greater than zero."
     with get_session() as session:
         session.add(SplitwiseRecord(
             user_id=user_id, person=person, amount=amount, kind=SplitwiseKind.DEBT,
-            date=dt.datetime.utcnow(), notes=notes,
+            date=date or now_ist(), notes=notes,
         ))
     return True, "Debt recorded."
 
@@ -704,7 +782,7 @@ def get_dashboard_metrics(user_id: int) -> DashboardMetrics:
         AccountType.CREDIT_CARD.value, AccountType.LIABILITY.value
     )) - liabilities + sw["owed_to_me"] - sw["i_owe"]
 
-    today = dt.date.today()
+    today = now_ist().date()
     month_start = dt.datetime(today.year, today.month, 1)
 
     with get_session() as session:
@@ -740,7 +818,7 @@ def get_net_worth_over_time(user_id: int, days: int = 180) -> pd.DataFrame:
     ))
     current_net = current_total - liabilities_total
 
-    since = dt.datetime.utcnow() - dt.timedelta(days=days)
+    since = now_ist() - dt.timedelta(days=days)
     with get_session() as session:
         txns = session.query(Transaction).filter(
             Transaction.user_id == user_id, Transaction.date >= since,
@@ -758,7 +836,7 @@ def get_net_worth_over_time(user_id: int, days: int = 180) -> pd.DataFrame:
                 daily_delta[d] = daily_delta.get(d, 0) + t.amount
             # transfers net to zero, no effect on total net worth
 
-    dates = pd.date_range(since.date(), dt.date.today(), freq="D")
+    dates = pd.date_range(since.date(), now_ist().date(), freq="D")
     values = []
     running = current_net
     # Walk from today backwards, undoing each day's net delta
@@ -767,7 +845,7 @@ def get_net_worth_over_time(user_id: int, days: int = 180) -> pd.DataFrame:
         reverse_map[d] = reverse_map.get(d, 0) + delta
 
     net_by_date = {}
-    cursor = dt.date.today()
+    cursor = now_ist().date()
     net_by_date[cursor] = running
     while cursor > since.date():
         running -= reverse_map.get(cursor, 0)

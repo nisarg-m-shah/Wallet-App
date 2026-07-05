@@ -11,6 +11,15 @@ import datetime as dt
 
 import pandas as pd
 
+IST_OFFSET = dt.timedelta(hours=5, minutes=30)
+
+
+def now_ist() -> dt.datetime:
+    """Current time in IST. The server (and dt.datetime.now()) runs in UTC on
+    Streamlit Cloud, so every 'current time' default in the app should go
+    through this instead, or date/time pickers default to the wrong time."""
+    return dt.datetime.utcnow() + IST_OFFSET
+
 CURRENCY_SYMBOLS = {"INR": "\u20B9", "USD": "$", "EUR": "\u20AC", "GBP": "\u00A3"}
 
 ACCOUNT_COLORS = [
@@ -27,6 +36,9 @@ TRANSACTION_TYPE_ICONS = {
     "Transfer": "\U0001F504",
     "Adjustment": "\U00002696\U0000FE0F",
 }
+
+PAYMENT_MODES = ["Cash", "UPI", "Splitwise", "Debit Card", "Netbanking"]
+DEFAULT_PAYERS = ["Mom", "Dad", "Pravis Consulting", "Aaryann Mavani", "Other"]
 
 
 def format_currency(amount: float, currency: str = "INR") -> str:

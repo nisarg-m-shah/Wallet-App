@@ -87,8 +87,59 @@ SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False
 
 
 def init_db() -> None:
-    """Create all tables if they do not already exist."""
+    """Create all tables if they do not already exist, then apply small migrations."""
     Base.metadata.create_all(engine)
+    _run_light_migrations()
+    _backfill_opening_balances()
+
+
+def _run_light_migrations() -> None:
+    """
+    Base.metadata.create_all() only creates missing TABLES, it never alters
+    existing ones - so adding a new column to a model needs a manual,
+    idempotent migration here.
+    """
+    from sqlalchemy import text
+
+    with engine.connect() as conn:
+        if DB_BACKEND == "postgres":
+            conn.execute(text("ALTER TABLE accounts ADD COLUMN IF NOT EXISTS opening_balance FLOAT"))
+            conn.commit()
+        else:
+            existing_cols = [row[1] for row in conn.execute(text("PRAGMA table_info(accounts)"))]
+            if "opening_balance" not in existing_cols:
+                conn.execute(text("ALTER TABLE accounts ADD COLUMN opening_balance FLOAT"))
+                conn.commit()
+
+
+def _backfill_opening_balances() -> None:
+    """
+    One-time backfill for accounts created before opening_balance existed.
+    Only touches accounts where it's still NULL, so this is safe to run on
+    every startup - it never overwrites a value that's already set.
+    """
+    from models import Transaction, TransactionType
+
+    with get_session() as session:
+        accounts = session.query(Account).filter(Account.opening_balance.is_(None)).all()
+        for acc in accounts:
+            delta_sum = 0.0
+            txns = session.query(Transaction).filter(
+                (Transaction.account_id == acc.id) | (Transaction.to_account_id == acc.id)
+            ).all()
+            for t in txns:
+                if t.account_id == acc.id:
+                    if t.type == TransactionType.EXPENSE:
+                        delta_sum -= t.amount
+                    elif t.type == TransactionType.INCOME:
+                        delta_sum += t.amount
+                    elif t.type == TransactionType.TRANSFER:
+                        delta_sum -= t.amount
+                    elif t.type == TransactionType.ADJUSTMENT:
+                        delta_sum += t.amount
+                if t.to_account_id == acc.id and t.type == TransactionType.TRANSFER:
+                    delta_sum += t.amount
+            acc.opening_balance = round(acc.balance - delta_sum, 2)
 
 
 @contextmanager
@@ -147,7 +198,7 @@ def seed_defaults_for_user(user_id: int) -> None:
     """Populate default accounts + categories for a freshly created user."""
     with get_session() as session:
         for acc in DEFAULT_ACCOUNTS:
-            session.add(Account(user_id=user_id, balance=0.0, currency="INR", notes="", **acc))
+            session.add(Account(user_id=user_id, balance=0.0, opening_balance=0.0, currency="INR", notes="", **acc))
 
         # Virtual Splitwise account (system account, not shown in normal account pickers)
         session.add(
@@ -156,6 +207,7 @@ def seed_defaults_for_user(user_id: int) -> None:
                 name="Splitwise",
                 type=AccountType.SPLITWISE,
                 balance=0.0,
+                opening_balance=0.0,
                 currency="INR",
                 color="#1CC29F",
                 icon="\U0001F91D",
