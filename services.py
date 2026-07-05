@@ -216,18 +216,23 @@ def add_transfer(user_id: int, amount: float, from_account_id: int, to_account_i
         _adjust_balance(session, from_account_id, -amount)
         _adjust_balance(session, to_account_id, amount)
 
-        # If this transfer settles a Splitwise liability, mark matching records settled
+        # If this transfer settles a Splitwise liability (money moving INTO the
+        # clearing account = you paying off what you owe), or collects a
+        # receivable (money moving OUT = someone paying you back), reconcile
+        # the matching records automatically.
         sw_acc = session.query(Account).filter(
             Account.user_id == user_id, Account.type == AccountType.SPLITWISE
         ).first()
         if sw_acc and to_account_id == sw_acc.id:
             _settle_splitwise_amount(session, user_id, amount)
+        elif sw_acc and from_account_id == sw_acc.id:
+            _settle_loan_amount(session, user_id, amount)
 
     return True, "Transfer completed."
 
 
 def _settle_splitwise_amount(session, user_id: int, amount: float) -> None:
-    """Mark unsettled Splitwise debt records as settled (oldest first) up to `amount`."""
+    """Mark unsettled Splitwise debt records (I owe someone) as settled (oldest first) up to `amount`."""
     remaining = amount
     records = session.query(SplitwiseRecord).filter(
         SplitwiseRecord.user_id == user_id,
@@ -243,6 +248,26 @@ def _settle_splitwise_amount(session, user_id: int, amount: float) -> None:
             rec.settled = True
         else:
             # Partially settle: shrink this record, done.
+            rec.amount -= remaining
+            remaining = 0
+
+
+def _settle_loan_amount(session, user_id: int, amount: float) -> None:
+    """Mark unsettled loan records (owed to me) as settled (oldest first) up to `amount`."""
+    remaining = amount
+    records = session.query(SplitwiseRecord).filter(
+        SplitwiseRecord.user_id == user_id,
+        SplitwiseRecord.kind == SplitwiseKind.LOAN,
+        SplitwiseRecord.settled.is_(False),
+    ).order_by(SplitwiseRecord.date.asc()).all()
+
+    for rec in records:
+        if remaining <= 0:
+            break
+        if rec.amount <= remaining:
+            remaining -= rec.amount
+            rec.settled = True
+        else:
             rec.amount -= remaining
             remaining = 0
 
@@ -519,16 +544,104 @@ def get_splitwise_summary(user_id: int) -> dict:
     return {"i_owe": owed_by_me, "owed_to_me": owed_to_me, "records": detail}
 
 
-def add_splitwise_loan(user_id: int, person: str, amount: float, notes: str) -> tuple[bool, str]:
-    """Record money I lent to someone else (they owe me)."""
+def add_loan(user_id: int, person: str, amount: float, notes: str,
+             date: dt.datetime | None = None, account_id: int | None = None) -> tuple[bool, str]:
+    """
+    Record money you lent to someone. If `account_id` is given, this is a
+    ONE-STEP action: it deducts the amount from that real account (parking it
+    in the Splitwise clearing account) AND records the debt-owed-to-you, so
+    you don't need a separate Expense entry. If `account_id` is None, this is
+    treated as untracked cash you had on hand - only the bookkeeping record
+    is created, no account balance changes.
+    """
     if amount <= 0:
         return False, "Amount must be greater than zero."
+    date = date or dt.datetime.utcnow()
+
     with get_session() as session:
+        if account_id is not None:
+            acc = session.query(Account).filter(Account.id == account_id, Account.user_id == user_id).first()
+            if not acc:
+                return False, "Invalid account."
+            sw_acc = session.query(Account).filter(
+                Account.user_id == user_id, Account.type == AccountType.SPLITWISE
+            ).first()
+            _adjust_balance(session, account_id, -amount)
+            _adjust_balance(session, sw_acc.id, amount)
+            session.add(Transaction(
+                user_id=user_id, type=TransactionType.TRANSFER, amount=amount,
+                description=f"Lent to {person}", account_id=account_id, to_account_id=sw_acc.id,
+                date=date, notes=notes,
+            ))
+
         session.add(SplitwiseRecord(
             user_id=user_id, person=person, amount=amount, kind=SplitwiseKind.LOAN,
-            date=dt.datetime.utcnow(), notes=notes,
+            date=date, notes=notes,
         ))
+
     return True, "Loan recorded."
+
+
+def add_split_expense(user_id: int, total_amount: float, your_share: float, account_id: int,
+                       category_id: int | None, description: str, date: dt.datetime,
+                       payment_mode: str, splits: list[tuple[str, float]]) -> tuple[bool, str]:
+    """
+    You paid the full bill, but only `your_share` is actually your expense.
+    Everyone else's portion (`splits`, a list of (person, amount) - can be
+    any number of people) gets parked as money owed to you, NOT counted in
+    your expense totals or analytics.
+    """
+    if total_amount <= 0 or your_share < 0:
+        return False, "Enter valid amounts."
+
+    others_total = round(sum(amt for _, amt in splits if amt and amt > 0), 2)
+    if round(your_share + others_total, 2) != round(total_amount, 2):
+        return False, (
+            f"Your share ({format_currency_plain(your_share)}) + others' shares "
+            f"({format_currency_plain(others_total)}) must add up to the total "
+            f"({format_currency_plain(total_amount)})."
+        )
+
+    with get_session() as session:
+        acc = session.query(Account).filter(Account.id == account_id, Account.user_id == user_id).first()
+        if not acc:
+            return False, "Invalid account."
+        sw_acc = session.query(Account).filter(
+            Account.user_id == user_id, Account.type == AccountType.SPLITWISE
+        ).first()
+
+        # Your actual share -> a normal, correctly-sized expense.
+        if your_share > 0:
+            session.add(Transaction(
+                user_id=user_id, type=TransactionType.EXPENSE, amount=your_share,
+                description=description, category_id=category_id, payment_mode=payment_mode,
+                account_id=account_id, date=date,
+            ))
+            _adjust_balance(session, account_id, -your_share)
+
+        # Everyone else's shares -> money advanced on their behalf, parked in the
+        # Splitwise clearing account. Not an expense of yours.
+        if others_total > 0:
+            _adjust_balance(session, account_id, -others_total)
+            _adjust_balance(session, sw_acc.id, others_total)
+            session.add(Transaction(
+                user_id=user_id, type=TransactionType.TRANSFER, amount=others_total,
+                description=f"Advanced for: {description}", account_id=account_id,
+                to_account_id=sw_acc.id, date=date,
+            ))
+            for person, amt in splits:
+                if not amt or amt <= 0:
+                    continue
+                session.add(SplitwiseRecord(
+                    user_id=user_id, person=person, amount=amt, kind=SplitwiseKind.LOAN,
+                    date=date, notes=f"Their share of: {description}",
+                ))
+
+    return True, "Split expense recorded - only your share counted as an expense."
+
+
+def format_currency_plain(amount: float) -> str:
+    return f"\u20B9{amount:,.2f}"
 
 
 def add_splitwise_debt(user_id: int, person: str, amount: float, notes: str) -> tuple[bool, str]:

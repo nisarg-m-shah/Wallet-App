@@ -23,11 +23,8 @@ def render(user_id: int, user: dict) -> None:
         st.error(
             "\U000026A0\U0000FE0F Running on local SQLite, NOT Postgres. "
             "On Streamlit Community Cloud this file is wiped every time the app "
-            "goes to sleep and reboots - which is almost certainly why transactions "
-            "have been disappearing. This means `DATABASE_URL` isn't being read from "
-            "Streamlit Cloud's Secrets manager. Go to your app -> Settings -> Secrets "
-            "and confirm `DATABASE_URL = \"postgresql://...\"` is saved there (not just "
-            "in your local `.streamlit/secrets.toml`, which never gets deployed)."
+            "goes to sleep and reboots. Go to your app -> Settings -> Secrets on "
+            "Streamlit Cloud and confirm `DATABASE_URL` is saved there."
         )
 
     st.divider()
@@ -76,5 +73,5 @@ def render(user_id: int, user: dict) -> None:
 
     st.divider()
     if st.button("Log Out", use_container_width=True):
-        del st.session_state["user"]
+        st.session_state.logout_requested = True
         st.rerun()

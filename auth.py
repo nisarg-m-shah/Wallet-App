@@ -69,3 +69,12 @@ def log_in(email: str, password: str) -> tuple[bool, str, dict | None]:
         user_dict = {"id": user.id, "email": user.email, "display_name": user.display_name}
 
     return True, "Logged in successfully.", user_dict
+
+
+def get_user_by_id(user_id: int) -> dict | None:
+    """Look up a user by id - used to restore a session from a 'remember me' cookie token."""
+    with get_session() as session:
+        user = session.query(User).filter(User.id == user_id).first()
+        if not user:
+            return None
+        return {"id": user.id, "email": user.email, "display_name": user.display_name}

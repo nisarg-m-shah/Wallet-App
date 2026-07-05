@@ -30,6 +30,9 @@ from views import recurring as view_recurring
 from views import settings as view_settings
 from views import transactions as view_transactions
 
+import pandas as pd
+import session_auth
+
 st.set_page_config(page_title="Wallet Tracker", page_icon="\U0001F4B0", layout="centered", initial_sidebar_state="collapsed")
 
 init_db()
@@ -46,6 +49,88 @@ load_css()
 # so there's nothing for it to do except cause the mobile collapse bug.
 st.markdown("<style>section[data-testid='stSidebar'] {display:none;}</style>", unsafe_allow_html=True)
 
+
+# --------------------------------------------------------------------------- #
+# Persistent login: Streamlit's session_state resets on every page reload,
+# so "remember me" is implemented via a signed token in a browser cookie.
+# --------------------------------------------------------------------------- #
+@st.cache_resource
+def get_cookie_manager():
+    import extra_streamlit_components as stx
+    return stx.CookieManager(key="wallet_cookie_manager")
+
+
+cookie_manager = get_cookie_manager()
+COOKIE_NAME = "wallet_session"
+
+if st.session_state.pop("logout_requested", False):
+    cookie_manager.delete(COOKIE_NAME)
+    st.session_state.pop("user", None)
+
+if "user" not in st.session_state:
+    token = cookie_manager.get(COOKIE_NAME)
+    if token:
+        restored_uid = session_auth.verify_token(token)
+        if restored_uid:
+            restored_user = auth.get_user_by_id(restored_uid)
+            if restored_user:
+                st.session_state.user = restored_user
+
+
+def _remember_login(user: dict) -> None:
+    st.session_state.user = user
+    token = session_auth.create_token(user["id"])
+    cookie_manager.set(COOKIE_NAME, token, expires_at=dt.datetime.now() + dt.timedelta(days=30), key="set_wallet_cookie")
+
+
+# --------------------------------------------------------------------------- #
+# Auth gate
+# --------------------------------------------------------------------------- #
+def render_auth_screen() -> None:
+    st.markdown(
+        "<div style='text-align:center; margin-top:3rem;'>"
+        "<div style='font-size:42px;'>\U0001F4B0</div>"
+        "<div style='font-size:26px; font-weight:800; color:#EDEEF2;'>Wallet Tracker</div>"
+        "<div style='color:#9096A8; margin-bottom:2rem;'>Your money, minus the spreadsheet.</div>"
+        "</div>",
+        unsafe_allow_html=True,
+    )
+    tab_login, tab_signup = st.tabs(["Log In", "Sign Up"])
+
+    with tab_login:
+        with st.form("login_form"):
+            email = st.text_input("Email")
+            password = st.text_input("Password", type="password")
+            submitted = st.form_submit_button("Log In", type="primary", use_container_width=True)
+        if submitted:
+            ok, msg, user = auth.log_in(email, password)
+            if ok:
+                _remember_login(user)
+                st.rerun()
+            else:
+                st.error(msg)
+
+    with tab_signup:
+        with st.form("signup_form"):
+            name = st.text_input("Name")
+            email_s = st.text_input("Email", key="signup_email")
+            password_s = st.text_input("Password", type="password", key="signup_pw",
+                                        help="At least 8 characters")
+            submitted_s = st.form_submit_button("Create Account", type="primary", use_container_width=True)
+        if submitted_s:
+            ok, msg = auth.sign_up(email_s, password_s, name)
+            if ok:
+                st.success(msg + " Please log in.")
+            else:
+                st.error(msg)
+
+
+if "user" not in st.session_state:
+    render_auth_screen()
+    st.stop()
+
+USER = st.session_state.user
+USER_ID = USER["id"]
 
 # --------------------------------------------------------------------------- #
 # Auth gate
