@@ -8,6 +8,7 @@ through here; `views/*.py` expose plain `render(user_id)` functions instead
 of being separate auto-detected Streamlit pages.
 """
 from __future__ import annotations
+import extra_streamlit_components as stx
 
 import datetime as dt
 import os
@@ -54,12 +55,10 @@ st.markdown("<style>section[data-testid='stSidebar'] {display:none;}</style>", u
 # Persistent login: Streamlit's session_state resets on every page reload,
 # so "remember me" is implemented via a signed token in a browser cookie.
 # --------------------------------------------------------------------------- #
-import extra_streamlit_components as stx
-
 cookie_manager = stx.CookieManager(key="wallet_cookie_manager")
 
 
-cookie_manager = get_cookie_manager()
+cookie_manager = stx.CookieManager(key="wallet_cookie_manager")
 COOKIE_NAME = "wallet_session"
 
 if st.session_state.pop("logout_requested", False):
