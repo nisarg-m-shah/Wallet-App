@@ -55,8 +55,6 @@ st.markdown("<style>section[data-testid='stSidebar'] {display:none;}</style>", u
 # Persistent login: Streamlit's session_state resets on every page reload,
 # so "remember me" is implemented via a signed token in a browser cookie.
 # --------------------------------------------------------------------------- #
-cookie_manager = stx.CookieManager(key="wallet_cookie_manager")
-
 
 cookie_manager = stx.CookieManager(key="wallet_cookie_manager")
 COOKIE_NAME = "wallet_session"
